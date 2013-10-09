@@ -34,9 +34,6 @@
 
 ;;; Code:
 
-;; for flet
-(eval-when-compile (require 'cl))
-
 (defvar control-mode-overrideable-bindings '(nil self-insert-command undefined))
 
 ;; Ignore Control-M
@@ -73,59 +70,66 @@
 (defun control-mode-mod-modifiers (event f)
   (event-convert-list (append (funcall f (remq 'click (event-modifiers event))) (list (event-basic-type event)))))
 
+
+(defun control-mode/key-bindingv (e)
+  (key-binding (vector e)))
+(defun control-mode/remove-modifier (event mod)
+  (control-mode-mod-modifiers event (lambda (x) (remq mod x))))
+(defun control-mode/add-modifier (event mod)
+  (control-mode-mod-modifiers event (lambda (x) (cons mod x))))
+(defun control-mode/add-modifiers (event mod1 mod2)
+  (control-mode-mod-modifiers event (lambda (x) (cons mod2 (cons mod1 x)))))
+(defun control-mode/is-overrideable (b)
+  (memq (control-mode/key-bindingv b) control-mode-overrideable-bindings))
+(defun control-mode/add-binding (km e b)
+  (define-key km (vector e) b))
+(defun control-mode/try-to-rebind (km e b)
+  (if (not (control-mode/is-overrideable e)) nil
+    (control-mode/add-binding km e b)
+    t))
+
 (defun control-mode-get-converted-keymap-for (keymap)
   (let ((auto-keymap (make-sparse-keymap)))
-    ;; Namespaces? What's that?
-    (flet ((add-binding (e b) (define-key auto-keymap (vector e) b))
-           (key-bindingv (e) (key-binding (vector e)))
-           (remove-modifier (event mod) (control-mode-mod-modifiers event (lambda (x) (remq mod x))))
-           (add-modifier (event mod) (control-mode-mod-modifiers event (lambda (x) (cons mod x))))
-           (add-modifiers (event mod1 mod2) (control-mode-mod-modifiers event (lambda (x) (cons mod2 (cons mod1 x)))))
-           (is-overrideable (b) (memq (key-bindingv b) control-mode-overrideable-bindings))
+    (map-keymap (lambda (ev bi) (control-mode-handle-binding ev bi auto-keymap))
+                keymap)
+    auto-keymap))
 
-           (try-to-rebind (e b)
-                          (if (not (is-overrideable e)) nil
-                            (add-binding e b)
-                            t)))
-          (map-keymap 'control-mode-handle-binding keymap)
-          auto-keymap)))
-
-(defun control-mode-handle-binding (event binding)
+(defun control-mode-handle-binding (event binding auto-keymap)
   (unless (memq event control-mode-ignore-events)
     (if (memq 'control (event-modifiers event))
-        (let ((newevent (remove-modifier event 'control)))
-          (when (try-to-rebind newevent binding)
+        (let ((newevent (control-mode/remove-modifier event 'control)))
+          (when (control-mode/try-to-rebind auto-keymap newevent binding)
             (unless (memq 'meta (event-modifiers event)) ; Here to be safe, but Meta events should be inside Escape keymap
-              (let ((cmbinding (key-bindingv (add-modifier event 'meta))))
+              (let ((cmbinding (control-mode/key-bindingv (control-mode/add-modifier event 'meta))))
                 (when cmbinding
-                  (add-binding event cmbinding)
-                  (let ((metaevent (add-modifier newevent 'meta)))
-                    (try-to-rebind metaevent cmbinding)))))))))
-  (if (and (eq event 27)
-           (keymapp binding))
-      (map-keymap 'control-mode-handle-escape-binding binding)))
+                  (control-mode/add-binding auto-keymap event cmbinding)
+                  (let ((metaevent (control-mode/add-modifier newevent 'meta)))
+                    (control-mode/try-to-rebind auto-keymap metaevent cmbinding)))))))))
+  (when (and (eq event 27) (keymapp binding))
+    (map-keymap (lambda (ev bi) (control-mode-handle-escape-binding ev bi auto-keymap))
+                binding)))
 
-(defun control-mode-handle-escape-binding (event binding)
+(defun control-mode-handle-escape-binding (event binding auto-keymap)
   (unless (memq event control-mode-ignore-events)
     (if (memq 'control (event-modifiers event))
-        (let ((only-meta (add-modifier (remove-modifier event 'control) 'meta))
-              (only-shift (add-modifier (remove-modifier event 'control) 'shift)))
-          (try-to-rebind only-meta binding)
-          (try-to-rebind event binding)
+        (let ((only-meta (control-mode/add-modifier (remove-modifier event 'control) 'meta))
+              (only-shift (control-mode/add-modifier (remove-modifier event 'control) 'shift)))
+          (control-mode/try-to-rebind auto-keymap only-meta binding)
+          (control-mode/try-to-rebind auto-keymap event binding)
           (if (and control-mode-rebind-to-shift
                    (not (memq 'shift (event-modifiers event)))
-                   (not (key-bindingv (add-modifier only-shift 'control)))
-                   (not (key-bindingv (add-modifier only-shift 'meta))))
-              (try-to-rebind only-shift binding)))
-      (let ((control-instead (add-modifier event 'control)))
-        (when (and (is-overrideable event)
-                   (or (not (key-bindingv control-instead))
+                   (not (control-mode/key-bindingv (control-mode/add-modifier only-shift 'control)))
+                   (not (control-mode/key-bindingv (control-mode/add-modifier only-shift 'meta))))
+              (control-mode/try-to-rebind auto-keymap only-shift binding)))
+      (let ((control-instead (control-mode/add-modifier event 'control)))
+        (when (and (control-mode/is-overrideable event)
+                   (or (not (control-mode/key-bindingv control-instead))
                        (memq control-instead control-mode-ignore-events)))
-          (add-binding event binding)
-          (let ((cmbinding (key-bindingv (add-modifiers event 'control 'meta))))
+          (control-mode/add-binding auto-keymap event binding)
+          (let ((cmbinding (control-mode/key-bindingv (control-mode/add-modifiers event 'control 'meta))))
             (when cmbinding
-              (add-binding (add-modifier event 'meta) cmbinding)
-              (add-binding control-instead cmbinding))))))))
+              (control-mode/add-binding auto-keymap (control-mode/add-modifier event 'meta) cmbinding)
+              (control-mode/add-binding auto-keymap control-instead cmbinding))))))))
 
 ;;;###autoload
 (define-minor-mode control-mode
